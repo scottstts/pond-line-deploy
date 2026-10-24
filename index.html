@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Pond Line</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Pond Line — A Flooded Train Garden in WebGPU</title>
 <meta name="description" content="Step aboard a sunlit commuter car flooded with clear water, where goldfish drift beneath hanging ivy and flower-filled seats. A real-time WebGPU scene built with three.js TSL.">
 <meta name="author" content="Scott Sun">
 <meta name="theme-color" content="#0d1c1b">
@@ -124,8 +124,25 @@
   #loader small { display: block; margin-top: 10px; font: 500 10.5px/1 Inter, sans-serif; letter-spacing: .25em; text-transform: uppercase; text-align: center; }
   #loader.err { color: #ffb4a0; font-size: 18px; padding: 24px; text-align: center; }
 
-  #refov { position: fixed; inset: 0; width: 100vw; height: 100vh; object-fit: fill; pointer-events: none; z-index: 2; display: none; }
 
+  /* touch: drag anywhere to look, stick bottom-left to move; the cinematic toggle becomes a round button */
+  #joy {
+    position: fixed; left: calc(22px + env(safe-area-inset-left)); bottom: calc(26px + env(safe-area-inset-bottom)); z-index: 6;
+    width: 128px; height: 128px; border-radius: 50%; display: none; touch-action: none;
+    background: var(--glass); border: 1px solid var(--glass-edge);
+    backdrop-filter: blur(14px) saturate(1.3); -webkit-backdrop-filter: blur(14px) saturate(1.3);
+    box-shadow: 0 10px 30px rgba(0, 25, 24, .22); transition: opacity .4s;
+  }
+  #joy i {
+    position: absolute; left: 50%; top: 50%; width: 52px; height: 52px; margin: -26px 0 0 -26px; border-radius: 50%;
+    background: rgba(246, 251, 248, .86); box-shadow: 0 4px 14px rgba(0, 25, 24, .3); transition: transform .14s ease-out;
+  }
+  body.touch #joy { display: block; }
+  body.touch.cinematic #joy { opacity: 0; pointer-events: none; }
+  body.touch #cine { left: auto; right: calc(22px + env(safe-area-inset-right)); bottom: calc(46px + env(safe-area-inset-bottom)); transform: none; width: 56px; height: 56px; padding: 0; justify-content: center; }
+  body.touch #cine span, body.touch #cine kbd { display: none; }
+  body.touch #cine:active { transform: scale(.94); }
+  body.touch.cinematic #cine { bottom: calc(7vh + 18px); }
   @media (max-width: 560px) {
     .brand { top: 16px; left: 16px; gap: 10px; }
     .brand svg { width: 36px; height: 36px; }
@@ -148,7 +165,6 @@
 </head>
 <body>
 <canvas id="view" tabindex="0"></canvas>
-<img id="refov" alt="">
 
 <a class="brand" href="#" aria-label="Pond Line">
   <svg viewBox="0 0 48 48" fill="none" aria-hidden="true">
@@ -177,6 +193,8 @@
   <span id="cinelabel">Cinematic shots</span><kbd>C</kbd>
 </button>
 
+<div id="joy" aria-hidden="true"><i></i></div>
+
 <div id="loader"><div>Boarding the pond line…<small>WebGPU · three.js TSL</small></div></div>
 
 <script type="module">
@@ -187,7 +205,7 @@ import {
   positionLocal, positionWorld, positionView, normalLocal, normalWorld, cameraPosition, cameraNear, cameraFar,
   screenUV, viewportSharedTexture, viewportDepthTexture, perspectiveDepthToViewZ, transformNormalToView, reflector,
   texture, instancedBufferAttribute, lights, mx_noise_float, mx_fractal_noise_float, pass, mrt, output, normalView,
-  builtinAOContext, renderOutput, luminance, hash, bumpMap, normalMap, atan, cubeTexture, directionToColor, colorToDirection, sample
+  builtinAOContext, cameraWorldMatrix, viewportSize, renderOutput, luminance, hash, bumpMap, normalMap, atan, cubeTexture, directionToColor, colorToDirection, sample
 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 
@@ -199,8 +217,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 // ─────────────────────────────────────────────────────────────────────────────
 // Parameters (metres, seconds). Car interior: x across, y up (car floor = 0), z along (−z = forward).
 // ─────────────────────────────────────────────────────────────────────────────
-const Q = new URLSearchParams(location.search);
-const SEED = Number(Q.get('seed') ?? 7);
+const SEED = 7;
 
 const R = 1.42;             // half interior width at the walls
 const WATER_Y = 0.30;       // flood level
@@ -259,12 +276,12 @@ if (!navigator.gpu) {
   throw new Error('WebGPU unavailable');
 }
 const renderer = new THREE.WebGPURenderer({ canvas, antialias: false });
-renderer.setPixelRatio(Math.min(devicePixelRatio, Q.has('dpr') ? Number(Q.get('dpr')) : 1.5));
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 renderer.setSize(innerWidth, innerHeight);
 renderer.toneMapping = THREE.NeutralToneMapping;
 renderer.toneMappingExposure = 0.88;
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = THREE.PCFShadowMap;
 await renderer.init();
 
 const scene = new THREE.Scene();
@@ -774,7 +791,7 @@ for (const b of BENCHES) {
 
 // ceiling cross-section (right half, outward → centre); mirrored for the left half
 const CEIL_PROFILE = (() => {
-  const p = [[R, WALL_TOP - 0.02], [R, WALL_TOP]];
+  const p = [[R, WALL_TOP]];   // starts at the wall top; a vertical run here would lie on the wall face
   // cove: a 45° slope for the ad frames, then a soft roll into the flat ceiling
   p.push([R - 0.28, WALL_TOP + 0.28]);
   for (let i = 1; i <= 6; i++) {
@@ -799,12 +816,11 @@ const ceilAt = (x) => {   // ceiling height at |x|
   const right = sweepZ(prof, Z_FAR, Z_NEAR, { flip: false });
   // the roof's sun shadow is a leafy mask (art-directed): sunlight falls through in organic pools
   const roofShadow = std({}, { probe: false });
-  roofShadow.castShadowNode = Fn(() => {
+  {
     const p = positionWorld.xz.mul(vec2(1.25, 0.9)).add(vec2(uTime.mul(0.006), 0));
     const n = mx_fractal_noise_float(vec3(p, 3.7), 4, 2.1, 0.55).add(mx_noise_float(vec3(positionWorld.xz.mul(7.0), 1.3)).mul(0.12));
-    n.greaterThan(uRoofOpen).discard();
-    return vec4(1);
-  })();
+    roofShadow.maskShadowNode = n.lessThanEqual(uRoofOpen);   // the roof casts shadow only where the mask keeps it
+  }
   const ceilR = add(right, M.ceil, { receive: false }), ceilL = add(mirrorX(right), M.ceil, { receive: false });
   for (const c of [ceilR, ceilL]) { c.castShadow = false; const sh = c.clone(); sh.material = roofShadow; sh.castShadow = true; sh.receiveShadow = false; sh.visible = true; sh.layers.set(2); sh.userData.shadowOnly = true; train.add(sh); }
 
@@ -812,7 +828,7 @@ const ceilAt = (x) => {   // ceiling height at |x|
   const paint = CEIL_EXTRA.paint = std({ roughness: 0.45 }); paint.colorNode = color(C(0xdfe4df));
   const louvre = CEIL_EXTRA.louvre = std({ roughness: 0.5, metalness: 0.15 }); louvre.colorNode = color(C(0xe4e8e2));
   const ductM = std({ roughness: 0.7 }); ductM.colorNode = color(C(0x7c8682));
-  const back = new THREE.PlaneGeometry(0.8, LEN); back.rotateX(Math.PI / 2); back.translate(0, 2.368, ZC);
+  const back = new THREE.PlaneGeometry(0.8, LEN); back.rotateX(Math.PI / 2); back.translate(0, 2.362, ZC);
   add(back, ductM, { cast: false });
   const fins = [], frames = [], fixtures = [], downlights = [];
   for (let z0 = Z_FAR + 0.3; z0 < Z_NEAR - 0.6; z0 += 1.6) {
@@ -850,8 +866,8 @@ const ceilAt = (x) => {   // ceiling height at |x|
   for (const sx of [-1, 1]) for (let z0 = Z_FAR + 0.25; z0 < Z_NEAR - 0.6; z0 += 1.65) {
     const len = 1.5, x = sx * 0.56, y = ceilAt(0.56) - 0.012;
     const d = new THREE.BoxGeometry(0.16, 0.018, len); d.translate(x, y - 0.006, z0 + len / 2); lamps.push(d);
-    for (const dx of [-0.09, 0.09]) { const f = new THREE.BoxGeometry(0.02, 0.026, len + 0.02); f.translate(x + dx, y, z0 + len / 2); lampFrames.push(f); }
-    for (const z of [z0 - 0.01, z0 + len + 0.01]) { const f = new THREE.BoxGeometry(0.2, 0.026, 0.02); f.translate(x, y, z); lampFrames.push(f); }
+    for (const dx of [-0.09, 0.09]) { const f = new THREE.BoxGeometry(0.02, 0.022, len + 0.02); f.translate(x + dx, y - 0.002, z0 + len / 2); lampFrames.push(f); }
+    for (const z of [z0 - 0.01, z0 + len + 0.01]) { const f = new THREE.BoxGeometry(0.2, 0.022, 0.02); f.translate(x, y - 0.002, z); lampFrames.push(f); }
   }
   const lmat = std({ roughness: 0.35 }); lmat.colorNode = color(C(0xf6f7f1)); lmat.emissiveNode = color(C(0xfff6e2)).mul(0.55);
   add(mergeAll(lamps), lmat, { cast: false });
@@ -868,7 +884,7 @@ const ceilAt = (x) => {   // ceiling height at |x|
 
   // door-top info displays on the cove above each side door
   for (const d of DOORS) for (const sx of [-1, 1]) {
-    const dm = std({ roughness: 0.3 });
+    const dm = std({ roughness: 0.3 }); dm.polygonOffset = true; dm.polygonOffsetFactor = -2; dm.polygonOffsetUnits = -2;
     const tx = canvasTex(512, 128, (g, w, h) => {
       g.fillStyle = '#121818'; g.fillRect(0, 0, w, h);
       g.fillStyle = '#f2b544'; g.font = 'bold 40px "Hiragino Sans", sans-serif'; g.fillText('みずべ公園', 22, 56);
@@ -885,7 +901,8 @@ const ceilAt = (x) => {   // ceiling height at |x|
   }
 
   // floor
-  const fl = new THREE.PlaneGeometry(2 * R + 0.2, LEN); fl.rotateX(-Math.PI / 2); fl.translate(0, 0, ZC);
+  // floor runs under the door recesses (end door leaves sit up to 6 cm into the wall, side doors 7 cm)
+  const fl = new THREE.PlaneGeometry(2 * R + 0.2, LEN + 0.2); fl.rotateX(-Math.PI / 2); fl.translate(0, 0, ZC);
   add(fl, M.floor, { cast: false });
 }
 
@@ -1122,7 +1139,7 @@ const strapPivots = [];
         const pg = new THREE.ExtrudeGeometry(s, { depth: 0.01, bevelEnabled: true, bevelThickness: 0.002, bevelSize: 0.002, bevelSegments: 2, curveSegments: 12 });
         const m = new THREE.Matrix4().set(-sign, 0, 0, sign * R, 0, 1, 0, 0, 0, 0, 1, zEnd + inward * 0.03 - 0.005, 0, 0, 0, 1);
         partitions.push(applyFix(pg, m));
-        POLES.push({ x: sign * (R - RAIL_OFF), z: zEnd + inward * 0.05 });
+        POLES.push({ x: sign * (R - RAIL_OFF), z: zEnd + inward * 0.06, end: true });   // clear of the partition glass
       }
       if (b.seats === 7) POLES.push({ x: sign * (R - RAIL_OFF), z: b.lo + L * 0.5 });
       // luggage rack: rods, front rail and brackets
@@ -1145,11 +1162,11 @@ const strapPivots = [];
   // continuous grab rails along both sides (over benches and door zones alike), hung from the cove
   const fittings = [];
   for (const sign of [1, -1]) {
-    const xr = sign * (R - RAIL_OFF), z0 = Z_FAR + 0.12, z1 = Z_NEAR - 0.12;
+    const xr = sign * (R - RAIL_OFF), z0 = Z_FAR + 0.013, z1 = Z_NEAR - 0.013;
     tube(barB, [new THREE.Vector3(xr, RAIL_Y, z0), new THREE.Vector3(xr, RAIL_Y, z1)], 0.0145, 12, null, false, true);
     // end returns into the end walls
     for (const [ze, dz] of [[z0, -1], [z1, 1]]) {
-      const plate = new THREE.CylinderGeometry(0.035, 0.035, 0.012, 16); plate.rotateX(Math.PI / 2); plate.translate(xr, RAIL_Y, ze + dz * 0.006 - dz * 0.0); fittings.push(plate);
+      const plate = new THREE.CylinderGeometry(0.035, 0.035, 0.012, 16); plate.rotateX(Math.PI / 2); plate.translate(xr, RAIL_Y, ze + dz * 0.006); fittings.push(plate);
     }
     // short vertical drops to mounting plates on the ceiling
     for (let z = z0 + 0.5; z < z1 - 0.2; z += 1.2) {
@@ -1177,16 +1194,16 @@ const strapPivots = [];
   // vertical grab handles beside every side doorway
   for (const d of DOORS) for (const sign of [1, -1]) for (const dz of [-1, 1]) {
     // one bent tube: out of the wall, up, back into the wall — with flanges where it meets the wall
-    const z = d + dz * (DOOR_W / 2 + 0.045);
+    const z = d + dz * (DOOR_W / 2 + 0.005);   // on the door-frame trim, clear of the partition glass
     const path2 = filletPolyline([[0.0, 0.84], [0.075, 0.84], [0.075, 1.7], [0.0, 1.7]], 0.035, 8);
     tube(poleB, path2.map(([o, y]) => new THREE.Vector3(sign * (R - 0.004 - o), y, z)), 0.0125, 12);
-    for (const y of [0.84, 1.7]) { const fl = new THREE.CylinderGeometry(0.024, 0.026, 0.008, 18); fl.rotateZ(Math.PI / 2); fl.translate(sign * (R - 0.004), y, z); fittings.push(fl); }
+    for (const y of [0.84, 1.7]) { const fl = new THREE.CylinderGeometry(0.024, 0.026, 0.008, 18); fl.rotateZ(Math.PI / 2); fl.translate(sign * (R - 0.005), y, z); fittings.push(fl); }
   }
   // silver trims around the side door openings
   const trims = [];
   for (const d of DOORS) for (const sign of [1, -1]) {
     for (const dz of [-1, 1]) { const t = new THREE.BoxGeometry(0.03, 1.88, 0.035); t.translate(sign * (R - 0.012), 0.94, d + dz * (DOOR_W / 2 + 0.012)); trims.push(t); }
-    const t = new THREE.BoxGeometry(0.03, 0.035, DOOR_W + 0.06); t.translate(sign * (R - 0.012), 1.875, d); trims.push(t);
+    const t = new THREE.BoxGeometry(0.026, 0.035, DOOR_W + 0.06); t.translate(sign * (R - 0.01), 1.875, d); trims.push(t);
   }
   add(mergeAll(trims), M.alu, { cast: false });
   // partition frame rails (steel tube up the front edge and over the curved top into the wall)
@@ -1199,7 +1216,7 @@ const strapPivots = [];
     for (let i = 0; i <= 10; i++) { const q = crv.getPoint(i / 10); pts.push(new THREE.Vector3(sign * (R - q.x), q.y, z)); }
     pts.push(new THREE.Vector3(sign * (R - 0.0), 1.04, z));
     tube(poleB, pts, 0.014, 10);
-    const fl = new THREE.CylinderGeometry(0.026, 0.028, 0.008, 18); fl.rotateZ(Math.PI / 2); fl.translate(sign * (R - 0.004), 1.04, z); partFlanges.push(fl);
+    const fl = new THREE.CylinderGeometry(0.026, 0.028, 0.008, 18); fl.rotateZ(Math.PI / 2); fl.translate(sign * (R - 0.005), 1.04, z); partFlanges.push(fl);
   }
   add(mergeAll(cushions), M.seat);
   add(mergeAll(backs), M.seat);
@@ -1281,7 +1298,7 @@ const SCREENS = [-2.85, -6.35];
   for (const [i, z] of SCREENS.entries()) {
     const box = new RoundedBoxGeometry(0.76, 0.45, 0.07, 4, 0.02); box.translate(0, 2.035, z);
     add(box, M.alu);
-    const bezel = new RoundedBoxGeometry(0.72, 0.41, 0.074, 3, 0.012); bezel.translate(0, 2.035, z);
+    const bezel = new RoundedBoxGeometry(0.72, 0.41, 0.08, 3, 0.012); bezel.translate(0, 2.035, z);
     add(bezel, M.dark);
     for (const side of [1, -1]) {
       const sm = std({ roughness: 0.18 }, { probe: true });
@@ -1289,7 +1306,7 @@ const SCREENS = [-2.85, -6.35];
       sm.colorNode = texture(tx).rgb.mul(0.05);
       sm.emissiveNode = texture(tx).rgb.mul(1.25);
       const p = new THREE.PlaneGeometry(0.672, 0.378); if (side < 0) p.rotateY(Math.PI);
-      p.translate(0, 2.035, z + side * 0.0385);
+      p.translate(0, 2.035, z + side * 0.0425);
       add(p, sm, { cast: false });
     }
     const rb = new GeoBuilder();
@@ -1302,7 +1319,7 @@ const SCREENS = [-2.85, -6.35];
     const L = b.hi - b.lo, n = Math.max(1, Math.floor(L / 1.0));
     for (const sign of [1, -1]) for (let k = 0; k < n; k++) {
       const z = b.lo + L * (k + 0.5) / n;
-      const am = std({ roughness: 0.38 }); const tx = adTex(seed++); am.colorNode = texture(tx).rgb;
+      const am = std({ roughness: 0.38 }); am.polygonOffset = true; am.polygonOffsetFactor = -2; am.polygonOffsetUnits = -2; const tx = adTex(seed++); am.colorNode = texture(tx).rgb;
       const p = new THREE.PlaneGeometry(0.74, 0.28);
       // plane faces +z; turn it to face the aisle and tilt down by 45°
       p.rotateY(-sign * Math.PI / 2);
@@ -1319,8 +1336,8 @@ const SCREENS = [-2.85, -6.35];
   let ps = 0;
   for (const b of BENCHES) for (const sign of [1, -1]) for (const z of [b.hi - 0.115, b.lo + 0.115]) {
     if (z > Z_NEAR - 0.3 || z < Z_FAR + 0.3) continue;
-    const pm = std({ roughness: 0.35 }); const tx = signTex(ps++ % 3); pm.colorNode = texture(tx).rgb;
-    const p = new THREE.PlaneGeometry(0.16, 0.24); p.rotateY(-sign * Math.PI / 2); p.translate(sign * (R - 0.003), 1.5, z);
+    const pm = std({ roughness: 0.35 }); pm.polygonOffset = true; pm.polygonOffsetFactor = -2; pm.polygonOffsetUnits = -2; const tx = signTex(ps++ % 3); pm.colorNode = texture(tx).rgb;
+    const p = new THREE.PlaneGeometry(0.16, 0.24); p.rotateY(-sign * Math.PI / 2); p.translate(sign * (R - 0.004), 1.5, z);
     add(p, pm, { cast: false });
   }
 }
@@ -1518,7 +1535,8 @@ for (const b of BENCHES) for (const sign of [1, -1]) {
       for (let k = 0; k < nb; k++) {
         const a = new THREE.Vector3(rimX + sign * rr(-0.04, 0.03), RACK_Y + rr(-0.03, 0.03), z + rr(-0.08, 0.08));
         const len = Math.pow(rng(), 1.5) * (nearCam ? 0.35 : 0.75) + 0.08;
-        addStrand(growHanging(a, new THREE.Vector3(-sign * rr(0.1, 0.7), rr(-0.3, 0.3), gauss() * 0.4), len, { minY: SEAT_Y + 0.5, wander: rr(0.15, 0.45), gravity: rr(0.15, 0.32) }), { facing, amp: 0.045 });
+        const nearEnd = Math.min(a.z - b.lo, b.hi - a.z) < 0.16;   // stay above the partition tops at the bench ends
+        addStrand(growHanging(a, new THREE.Vector3(-sign * rr(0.1, 0.7), rr(-0.3, 0.3), gauss() * 0.4), len, { minY: nearEnd ? 1.12 : SEAT_Y + 0.5, wander: rr(0.15, 0.45), gravity: rr(0.15, 0.32) }), { facing, amp: 0.045 });
       }
     }
   }
@@ -1582,7 +1600,7 @@ for (const z of SCREENS) {
 }
 // climbers twining up some poles, with leafy collars
 for (const p of POLES) {
-  if (rng() < 0.45) continue;
+  if (p.end || rng() < 0.45) continue;   // end poles stand against the partition glass
   const top = rr(1.3, 2.25), y0 = SEAT_Y + 0.02, pts = [];
   const turns = (top - y0) / 0.25, a0 = rng() * 6.283;
   for (let i = 0; i <= turns * 14; i++) {
@@ -1753,6 +1771,11 @@ function addFlower(head, dir, kind, palette, size, swAmp = 0.02, stemLen = 0.1, 
 
 // flower beds: a heaped mound (tallest against the wall) packed with blooms in drifts, foliage underneath,
 // and a spill over the seat edge
+function cushionTop(b, z) {
+  const L = b.hi - b.lo - 0.06, zz = z - (b.lo + 0.03), f = ((zz / (L / b.seats)) % 1 + 1) % 1;
+  const taper = THREE.MathUtils.smoothstep(Math.min(zz, L - zz), 0, 0.02);
+  return SEAT_Y + (0.014 * Math.pow(Math.sin(Math.PI * f), 0.55) - 0.004) * taper;
+}
 function plantBench(b, sign, schemeName) {
   const scheme = SCHEMES[schemeName];
   // the mound occupies the back of the seat; the front ~18 cm of cushion stays visible, as in the reference
@@ -1776,7 +1799,7 @@ function plantBench(b, sign, schemeName) {
   const sizes = { cosmos: [0.035, 0.065], aster: [0.032, 0.055], cluster: [0.028, 0.048], pompon: [0.03, 0.05] };
   const nHeads = Math.round(L * D * 360);
   for (let k = 0; k < nHeads; k++) {
-    const xo = rr(0.13, D + 0.02), z = rr(b.lo + 0.04, b.hi - 0.04);
+    const xo = rr(0.13, D + 0.02), z = rr(b.lo + 0.12, b.hi - 0.12);
     const h = mound(xo, z) * rr(0.72, 1.04);
     const n = normalAt(xo, z);
     const p = new THREE.Vector3(sign * (R - xo), SEAT_Y + h, z);
@@ -1787,13 +1810,13 @@ function plantBench(b, sign, schemeName) {
   }
   // filler: tiny pale florets
   for (let k = 0; k < L * 50; k++) {
-    const xo = rr(0.15, D), z = rr(b.lo + 0.05, b.hi - 0.05), h = mound(xo, z) * rr(0.85, 1.12);
+    const xo = rr(0.15, D), z = rr(b.lo + 0.08, b.hi - 0.08), h = mound(xo, z) * rr(0.85, 1.12);
     HEADS.cluster.list.push({ p: new THREE.Vector3(sign * (R - xo), SEAT_Y + h, z), dir: normalAt(xo, z), size: rr(0.014, 0.022), c1: lin(rpick(['#ffffff', '#f6eefc', '#fff6d8'])), c2: lin('#fff3c0'), sw: [h, rng() * 6, 0.12] });
   }
   // foliage filling the mound
   const nLeaves = Math.round(L * D * 520);
   for (let k = 0; k < nLeaves; k++) {
-    const xo = rr(0.12, D + 0.04), z = rr(b.lo + 0.02, b.hi - 0.02);
+    const xo = rr(0.12, D + 0.04), z = rr(b.lo + 0.13, b.hi - 0.13);
     const h = mound(xo, z) * Math.pow(rng(), 0.6) * 0.95;
     const n = normalAt(xo, z);
     const p = new THREE.Vector3(sign * (R - xo), SEAT_Y + h, z);
@@ -1805,9 +1828,9 @@ function plantBench(b, sign, schemeName) {
   }
   // a ground layer of leaves lying on the cushion, so the planting visibly sits on the seat
   for (let k = 0; k < L * D * 160; k++) {
-    const xo = rr(0.08, D + 0.06), z = rr(b.lo + 0.03, b.hi - 0.03);
-    const p = new THREE.Vector3(sign * (R - xo), SEAT_Y + rr(0.004, 0.03), z);
-    const out = new THREE.Vector3(-sign * rr(0.2, 1), rr(0.05, 0.35), gauss() * 0.8).normalize();
+    const xo = rr(0.08, D + 0.06), z = rr(b.lo + 0.13, b.hi - 0.13);
+    const p = new THREE.Vector3(sign * (R - xo), cushionTop(b, z) + rr(0.008, 0.03), z);
+    const out = new THREE.Vector3(-sign * rr(0.2, 1), rr(0.08, 0.35), gauss() * 0.8).normalize();
     vineLeaves.push({ p, axis: out, face: new THREE.Vector3(gauss() * 0.3, 1, gauss() * 0.3).normalize(), size: rr(0.045, 0.085), aspect: rr(0.8, 1.0), col: hsl(rr(0.22, 0.3), rr(0.4, 0.6), rr(0.1, 0.22)), sw: [0.01, rng() * 6, 0.005] });
   }
   // dense foliage core under the blooms (what you see between leaves), sloping down to the cushion at its edges
@@ -1825,7 +1848,7 @@ function plantBench(b, sign, schemeName) {
     }
   }
   // spill over the seat front
-  for (let z = b.lo + 0.1; z < b.hi - 0.1; z += rr(0.15, 0.4)) {
+  for (let z = b.lo + 0.2; z < b.hi - 0.2; z += rr(0.15, 0.4)) {
     const a = new THREE.Vector3(sign * (R - D + 0.02), SEAT_Y + rr(0.03, 0.08), z);
     const pts = growHanging(a, new THREE.Vector3(-sign, -0.3, gauss() * 0.3), rr(0.08, 0.2), { gravity: 0.35, wander: 0.3, minY: WATER_Y + 0.06 });
     addStrand(pts, { facing: new THREE.Vector3(-sign, 0.3, 0.3), sizeTop: 0.04, sizeTip: 0.028, amp: 0.06, depth: 1 });
@@ -1835,7 +1858,8 @@ function plantBench(b, sign, schemeName) {
   // fallen petals on the cushion front
   for (let k = 0; k < Math.round(L * 22); k++) {
     const [c] = cpair(rng() < 0.6 ? 'pink' : rpick(['yellow', 'orange', 'lilac']));
-    fallenPetals.push({ p: new THREE.Vector3(sign * (R - rr(0.4, 0.55)), SEAT_Y + 0.012, rr(b.lo + 0.05, b.hi - 0.05)), c, rot: rng() * 6.283, s: rr(0.012, 0.02) });
+    const z = rr(b.lo + 0.07, b.hi - 0.07);
+    fallenPetals.push({ p: new THREE.Vector3(sign * (R - rr(0.4, 0.49)), cushionTop(b, z) + 0.005, z), c, rot: rng() * 6.283, s: rr(0.012, 0.02) });
   }
 }
 const fallenPetals = [];
@@ -1884,7 +1908,7 @@ const grassBlades = [];
 // tufts of grass in the beds
 for (const b of BENCHES) for (const sign of [1, -1]) {
   for (let k = 0; k < (b.hi - b.lo) * 5; k++) {
-    const z = rr(b.lo + 0.1, b.hi - 0.1), base = new THREE.Vector3(sign * (R - rr(0.08, 0.3)), SEAT_Y, z);
+    const z = rr(b.lo + 0.3, b.hi - 0.3), base = new THREE.Vector3(sign * (R - rr(0.08, 0.3)), SEAT_Y, z);
     const golden = rng() < 0.3;
     for (let j = 0; j < 9; j++) {
       const a = rng() * 6.283;
@@ -1912,7 +1936,6 @@ function grassMesh() {
 }
 
 for (const [list, geo] of [[vineLeaves, LEAF], [bedLeaves, LEAF_LANCE], [lanceLeaves, LEAF_LANCE]]) if (list.length) train.add(leafInstances(list, geo));
-console.info('vegetation', { vineLeaves: vineLeaves.length, bedLeaves: bedLeaves.length, heads: Object.fromEntries(Object.entries(HEADS).map(([k, h]) => [k, h.list.length])) });
 train.add(grassMesh());
 train.add(stemMesh(stemB));
 buildHeads();
@@ -1924,7 +1947,7 @@ buildHeads();
   const cols = new Float32Array(fallenPetals.length * 3);
   const m4 = new THREE.Matrix4(), q = new THREE.Quaternion();
   fallenPetals.forEach((f, i) => {
-    q.setFromEuler(new THREE.Euler(gauss() * 0.15, f.rot, gauss() * 0.15));
+    q.setFromEuler(new THREE.Euler(gauss() * 0.06, f.rot, gauss() * 0.06));
     m4.compose(f.p, q, new THREE.Vector3(f.s, f.s, f.s)); im.setMatrixAt(i, m4);
     cols.set([f.c.r, f.c.g, f.c.b], i * 3);
   });
@@ -2133,7 +2156,7 @@ function makeFish(spec, idx) {
   const fu = af.x, fv = af.y;
   const rays = smoothstep(0.7, 1.0, abs(fract(fv.mul(select(af.z.lessThan(0.5), float(16.0), float(9.0)))).mul(2).sub(1)));
   const edge = smoothstep(0.82, 1.0, fu).max(smoothstep(0.88, 1.0, abs(fv)));
-  const finCol = mix(mix(c1, c2, 0.4), cream, fu.mul(0.55).add(patch.mul(0)).add(edge.mul(0.3)));
+  const finCol = mix(mix(c1, c2, 0.4), cream, fu.mul(0.55).add(edge.mul(0.3)));
   fins.colorNode = uw(finCol.mul(float(1).sub(rays.mul(0.1))));
   fins.opacityNode = float(0.78).sub(fu.mul(0.42)).add(rays.mul(0.12)).mul(float(1).sub(edge.mul(0.55))).clamp(0.05, 0.92);
   fins.positionNode = deform(true);
@@ -2196,11 +2219,15 @@ function updateFish(dt, t) {
 const uProj = uniform(new THREE.Vector2(1, 1));
 const uWaterAmb = uniform(new THREE.Color(0.55, 1.25, 1.15));
 const sun = new THREE.DirectionalLight(new THREE.Color(1.0, 0.9, 0.74), 6.5);
-const refl = reflector({ resolutionScale: 0.5, bounces: false });
-refl.target.rotateX(-Math.PI / 2); refl.target.position.y = WATER_Y;
+const refl = reflector({ resolutionScale: 0.5, bounces: false, depth: true });
+refl.target.rotateX(-Math.PI / 2);
+// mirror plane a few mm under the surface: a clip plane exactly at the waterline cuts open the walls' bases and the
+// reflection would see through them to the bright sky (a seam where walls and doors meet the water)
+refl.target.position.y = WATER_Y - 0.006;
 scene.add(refl.target);
 const water = (() => {
-  const g = new THREE.PlaneGeometry(2 * R, LEN); g.rotateX(-Math.PI / 2); g.translate(0, WATER_Y, ZC);
+  // the surface reaches into the door recesses so it meets every door leaf instead of stopping at the wall face
+  const g = new THREE.PlaneGeometry(2 * (R + 0.08), LEN + 0.16); g.rotateX(-Math.PI / 2); g.translate(0, WATER_Y, ZC);
   const m = new THREE.MeshPhysicalNodeMaterial({ roughness: 0.03, metalness: 0, ior: IOR_W, transparent: true, depthWrite: true });
   m.lightsNode = lights([sun]);
   const fp = length(fwidth(positionWorld.xz));
@@ -2209,7 +2236,22 @@ const water = (() => {
   m.normalNode = transformNormalToView(Nw);
   m.colorNode = vec3(0);
   // reflection with wave distortion (planar mirror of the whole car)
-  refl.uvNode = refl.uvNode.add(Nw.xz.mul(0.045).div(max(length(positionView).mul(0.35), 1.0)));
+  const reflUV0 = refl.uvNode;
+  const reflUV = reflUV0.add(Nw.xz.mul(0.045).div(max(length(positionView).mul(0.35), 1.0)));
+  refl.uvNode = reflUV;
+  // The mirror render clips everything below the surface, walls' bases included, so a wave-distorted lookup that
+  // slips past a wall's mirrored base sees through to the open sky. Such a sample is "far" only because of the
+  // distortion: compare with the undistorted lookup and fall back to it there.
+  const reflDepth = refl.getDepthNode();
+  reflDepth.uvNode = reflUV;
+  const farAt = (d) => perspectiveDepthToViewZ(d, cameraNear, cameraFar).negate().greaterThan(40.0);
+  // at the very contact the half-res mirror texels straddle wall and sky, so look one texel either side as well
+  const tex = vec2(0, 3.0).div(viewportSize);
+  const uvA = reflUV0, uvB = reflUV0.add(tex), uvC = reflUV0.sub(tex);
+  const nearA = farAt(reflDepth.sample(uvA).r).not(), nearB = farAt(reflDepth.sample(uvB).r).not(), nearC = farAt(reflDepth.sample(uvC).r).not();
+  const leak = farAt(reflDepth.r).and(nearA.or(nearB).or(nearC));
+  const reflNear = select(nearA, refl.sample(uvA).rgb, select(nearB, refl.sample(uvB).rgb, refl.sample(uvC).rgb));
+  const reflClean = select(leak, reflNear, refl.rgb);
   m.emissiveNode = Fn(() => {
     const V = normalize(cameraPosition.sub(positionWorld));
     const cosi = clamp(dot(Nw, V), 0.001, 1.0);
@@ -2234,7 +2276,12 @@ const water = (() => {
     const offs = vec2(dV.x.mul(uProj.x), dV.y.mul(uProj.y).negate()).div(positionView.z.negate()).mul(0.5);
     const uvR = screenUV.add(offs);
     const z1 = perspectiveDepthToViewZ(viewportDepthTexture(uvR), cameraNear, cameraFar);
-    const ok = z1.lessThan(positionView.z.sub(0.005));
+    // accept the refracted sample only if it lies behind the surface *and* below the waterline; otherwise, at a wall
+    // or door, the wave offset would pull the sunlit wall above the water into the water as a bright seam
+    const ndc = vec2(uvR.x.mul(2).sub(1), float(1).sub(uvR.y.mul(2)));
+    const vpos = vec3(ndc.x.mul(z1.negate()).div(uProj.x), ndc.y.mul(z1.negate()).div(uProj.y), z1);
+    const wpos = cameraWorldMatrix.mul(vec4(vpos, 1)).xyz;
+    const ok = z1.lessThan(positionView.z.sub(0.005)).and(wpos.y.lessThan(WATER_Y - 0.004));
     const uvF = select(ok, uvR, screenUV);
     const zF = select(ok, z1, z0);
     const pScene = cameraPosition.add(rayW.mul(distW.mul(zF.div(positionView.z))));
@@ -2245,7 +2292,7 @@ const water = (() => {
     const ssAlb = vec3(SIGMA_S.x, SIGMA_S.y, SIGMA_S.z).div(sigmaT);
     const inscatter = uWaterAmb.mul(ssAlb).mul(float(1).sub(trans));
     const transmitted = below.mul(trans).add(inscatter);
-    const reflected = refl.rgb;
+    const reflected = reflClean;
     return mix(transmitted, reflected, F);
   })();
   const mesh = new THREE.Mesh(g, m);
@@ -2268,10 +2315,76 @@ sky.sunPosition.value.copy(SUN_DIR);
 // art direction: hold the sky a few stops down so it stays blue through the glass next to the lit cabin
 const uSkyGain = uniform(0.62);
 sky.material.colorNode = sky.material.colorNode.mul(uSkyGain);
+// purple-pink horizon haze: one band shared by the sky, the cloud bases and the far sea. Colours are pre-compensated
+// for the blue window glass and the grade (they read as soft lavender-pink through the windows). Held at 0 while the
+// sky probe is captured so the sea's calibration to the clear horizon is unaffected.
+const uHaze = uniform(1);
+const HAZE_PEAK = vec3(4.4, 1.917, 1.351), HAZE_SOFT = vec3(3.736, 1.942, 1.441), HAZE_SEA = vec3(3.145, 1.591, 1.158);
+{
+  const el = max(normalize(positionWorld.sub(cameraPosition)).y, 0.0);
+  const band = exp(el.div(0.11).negate()).mul(0.8).add(exp(el.div(0.025).negate()).mul(0.2)).mul(uHaze);
+  sky.material.colorNode = mix(sky.material.colorNode, mix(HAZE_SOFT, HAZE_PEAK, exp(el.div(0.04).negate())), band.mul(0.95));
+}
 sky.cloudCoverage.value = 0.16; sky.cloudDensity.value = 0.35; sky.cloudElevation.value = 0.55;
 scene.add(sky);
 
 // open sea: Fresnel mix of the captured sky and a deep-water body, footprint-filtered so distance stays calm
+// stylised cumulus band above the sea line: one transparent dome, a handful of noise lookups.
+// Colours are pre-compensated for the blue window glass and the grade so they read as soft white.
+const uCloudDrift = uniform(0);
+const clouds = (() => {
+  // cumulus along the horizon, as a continuous density field in (azimuth, elevation): soft flat bases, billowy
+  // domain-warped tops, Beer–Lambert opacity and a 3-tap march toward the sun for self-shadowing. Cheap 2.5D.
+  const g = new THREE.SphereGeometry(1400, 96, 24, 0, Math.PI * 2, 0, Math.PI * 0.5);
+  const m = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.BackSide, fog: false });
+  const dir = normalize(positionWorld.sub(cameraPosition));
+  const phi0 = dir.y;                                                    // ≈ elevation (rad) near the horizon
+  const az0 = atan(dir.z, dir.x).add(uCloudDrift);
+  const hz = normalize(vec2(dir.x, dir.z)), sunH = normalize(vec2(SUN_DIR.x, SUN_DIR.z));
+  const side = clamp(hz.x.mul(sunH.y).sub(hz.y.mul(sunH.x)).mul(1.5), -0.7, 0.7);
+  const toSun = normalize(vec2(side, 1.0));                              // sun direction projected onto the sky
+  const base = float(0.017);
+  // seamless round the horizon: azimuth enters the noise as a point on a circle
+  const ring = (a, k, z) => vec3(cos(a).mul(k), sin(a).mul(k), z);
+  const density = (az, phi) => {
+    const bank = smoothstep(-0.45, 0.0, mx_noise_float(ring(az, 2.4, 1.7)));                 // banks and clear gaps
+    // broad rounded lumps: distant cumulus are wider than tall
+    const billow = mx_fractal_noise_float(ring(az, 5.0, 3.3), 2, 2.0, 0.5).mul(0.9).add(0.5).clamp(0.0, 1.0);
+    const top = base.add(bank.mul(billow.mul(0.1).add(0.025)));
+    // domain warp so the outline boils into cauliflower lobes instead of a smooth curve
+    const warp = mx_noise_float(vec3(cos(az).mul(30.0), sin(az).mul(30.0), phi.mul(55.0))).mul(0.01)
+      .add(mx_noise_float(vec3(cos(az).mul(13.0), sin(az).mul(13.0), phi.mul(24.0).add(5.0))).mul(0.016));
+    const h = phi.sub(base).div(max(top.sub(base), 0.004));
+    // crisp, lobed outline (the warp boils the top edge) over a softly feathered flat base
+    const edge = smoothstep(0.0, 0.0035, top.add(warp).sub(phi));
+    const body = smoothstep(0.0, 0.1, h).mul(edge).mul(step(0.0015, top.sub(base)));
+    const detail = mx_fractal_noise_float(vec3(cos(az).mul(55.0), sin(az).mul(55.0), phi.mul(95.0).add(uCloudDrift.mul(20.0))), 3, 2.1, 0.5);
+    return body.mul(bank.mul(0.6).add(0.4)).mul(detail.mul(0.35).add(1.1));
+  };
+  const d0 = density(az0, phi0);
+  // optical depth toward the sun from three taps → smooth self-shadowing
+  let od = float(0);
+  for (const k of [0.006, 0.014, 0.026]) od = od.add(density(az0.add(toSun.x.mul(k)), phi0.add(toSun.y.mul(k))));
+  const sunT = exp(od.mul(-0.9));
+  const height = smoothstep(base, base.add(0.08), phi0);
+  const alpha = float(1).sub(exp(d0.mul(-6.0)));
+  // colours pre-compensated for the blue glass and the grade: sunlit → warm white, shade → cool grey
+  const shadeCol = vec3(2.3, 1.7, 1.28), litCol = vec3(5.6, 3.37, 1.83);
+  // high sun: bodies read bright against the sky, grey gathers toward the flat underside
+  const under = float(1).sub(smoothstep(base, base.add(0.012), phi0));
+  const light = clamp(sunT.mul(0.45).add(0.4).add(height.mul(0.3)).sub(under.mul(0.45)), 0.0, 1.0);
+  let col = mix(shadeCol, litCol, light);
+  // the lowest, most distant parts dissolve into the horizon haze
+  const haze = float(1).sub(smoothstep(base, base.add(0.06), phi0)).mul(0.6).mul(uHaze);
+  col = mix(col, HAZE_SOFT, haze);
+  m.colorNode = col;
+  m.opacityNode = alpha.mul(float(1).sub(haze.mul(0.5)));
+  const mesh = new THREE.Mesh(g, m);
+  mesh.position.set(0, 1.3, ZC); mesh.renderOrder = -1; mesh.frustumCulled = false;
+  scene.add(mesh);
+  return mesh;
+})();
+
 const sea = (() => {
   const g = new THREE.PlaneGeometry(8000, 8000, 1, 1); g.rotateX(-Math.PI / 2);
   const m = new THREE.MeshBasicNodeMaterial();
@@ -2280,9 +2393,9 @@ const sea = (() => {
   scene.add(mesh);
   return mesh;
 })();
-// stylised open sea: flat painted tones (deep at the horizon, brighter close in), a crisp horizon line,
-// and a few soft drifting wave dashes instead of a full wave field
-const uSeaWaves = uniform(0.22);
+// open sea: painted tones calibrated to the reference (deep at the horizon, brighter close in), a crisp
+// horizon line, a footprint-filtered analytic swell shaded by Fresnel, and art-directed sun glints
+const uSeaWaves = uniform(1.0), uGlint = uniform(14.0);
 // soft grey-blue paint (it reads as the reference's sea once seen through the blue-tinted glass and the grade)
 const uSeaFar = uniform(new THREE.Color(0.411, 0.327, 0.241)), uSeaNear = uniform(new THREE.Color(0.463, 0.373, 0.266));
 function seaMaterial(skyTex) {
@@ -2293,13 +2406,36 @@ function seaMaterial(skyTex) {
   const V = normalize(cameraPosition.sub(positionWorld));
   // scale the paint to the sky's own brightness at the horizon so the two stay in balance
   const skyL = luminance(cubeTexture(skyTex, normalize(vec3(V.x.negate(), 0.02, V.z.negate()))).rgb);
-  let c = mix(uSeaFar, uSeaNear, smoothstep(0.002, 0.09, depress)).mul(skyL.mul(0.62));
-  // soft wave dashes: elongated along the swell, fading out before they could shimmer at distance
-  const q = vec3(P.x.mul(0.018), P.y.mul(0.11), uTime.mul(0.04));
-  const nz = mx_noise_float(q).add(mx_noise_float(q.mul(2.3).add(vec3(3.1, 7.7, 0))).mul(0.5));
-  const dash = smoothstep(0.42, 0.7, nz);
-  const fade = float(1).sub(smoothstep(0.08, 0.35, fwidth(nz))).mul(smoothstep(0.004, 0.03, depress));
-  c = c.add(color(lin('#a9d8f5')).mul(skyL.mul(0.5)).mul(dash).mul(fade).mul(uSeaWaves));
+  // swell: two analytic wave scales (the pond bundle stretched to 1–9 m and 0.3–2.5 m), each faded by the
+  // pixel footprint so distant water settles into smooth bands instead of shimmering
+  const x1 = P.mul(0.055), x2 = P.mul(0.2).add(vec2(13.1, 7.7));
+  const s1 = waveSlope(x1, uTime.mul(0.16), length(fwidth(x1)).mul(1.6));
+  const s2 = waveSlope(x2, uTime.mul(0.34), length(fwidth(x2)).mul(1.6));
+  const slope = s1.add(s2.mul(0.55)).mul(uSeaWaves);
+  const N = normalize(vec3(slope.x.negate(), 1, slope.y.negate()));
+  // Fresnel between the deep water body and a lighter sky reflection; the means stay on the calibrated tone
+  const cosv = clamp(dot(N, V), 0.0, 1.0);
+  const F = float(0.02).add(float(0.98).mul(pow(float(1).sub(cosv), 5.0)));
+  const paint = mix(uSeaFar, uSeaNear, smoothstep(0.002, 0.09, depress));
+  const bodyCol = paint.mul(0.82), skyCol = paint.mul(vec3(1.06, 1.1, 1.14));   // grazing far water settles on the calibrated tone
+  let c = mix(bodyCol, skyCol, smoothstep(0.05, 0.9, F)).mul(skyL.mul(0.62));
+  // sun glints (art-directed): twinkling points scattered over the sea, densest toward the sun's bearing,
+  // fading into a soft shimmer where the cells get smaller than a pixel
+  const g = P.mul(vec2(0.55, 1.6));
+  const cell = floor(g), f = fract(g);
+  const h0 = hash(cell.x.add(cell.y.mul(157.31))), h1 = hash(cell.x.mul(3.7).add(cell.y.mul(51.9)).add(11.0)), h2 = hash(cell.x.mul(9.1).add(cell.y.mul(23.3)).add(29.0));
+  const spot = vec2(h1, h2).mul(0.6).add(0.2);
+  const dd = length(f.sub(spot).mul(vec2(1.0, 1.8)));
+  const twinkle = pow(max(sin(uTime.mul(h1.mul(2.0).add(1.6)).add(h0.mul(40.0))), 0.0), 3.0);
+  const fp = length(fwidth(g));
+  const spark = smoothstep(0.17, 0.0, dd).mul(step(0.5, h0)).mul(twinkle).mul(float(1).sub(smoothstep(0.25, 0.6, fp)));
+  const vh = normalize(vec2(V.x, V.z).negate()), sh = normalize(vec2(SUN_DIR.x, SUN_DIR.z));
+  const sunward = pow(max(dot(vh, sh), 0.0), 3.0);
+  const shimmer = smoothstep(0.25, 0.6, fp).mul(float(1).sub(smoothstep(0.003, 0.0, depress))).mul(0.45)
+    .mul(mx_noise_float(vec3(P.x.mul(0.01), P.y.mul(0.06), uTime.mul(0.5))).mul(0.5).add(0.5));
+  const glint = spark.mul(mix(0.25, 1.0, sunward)).mul(uGlint).add(shimmer.mul(sunward).mul(0.5));
+  c = c.add(color(lin('#fff4dc')).mul(skyL).mul(glint));
+  c = mix(c, HAZE_SEA, exp(depress.div(0.009).negate()).mul(0.85).mul(uHaze));
   m.colorNode = c;
   return m;
 }
@@ -2347,24 +2483,44 @@ loader.addEventListener('click', () => { if (loader.classList.contains('ready'))
 controls.addEventListener('lock', () => { loader.classList.add('gone'); loader.classList.remove('paused'); });
 controls.addEventListener('unlock', () => { loader.classList.remove('gone'); loader.classList.add('paused'); vel.set(0, 0, 0); keys.clear(); });
 canvas.addEventListener('click', () => { if (!controls.isLocked && !dragLook.fallback) controls.lock(); });
-// where pointer lock is refused (embedded views, some browsers), fall back to click-and-drag look
-const dragLook = { fallback: false, on: false, x: 0, y: 0 };
+// where pointer lock is refused (embedded views, some browsers) or absent (touch), drag to look instead
+const touchUI = matchMedia('(pointer: coarse)').matches && !matchMedia('(any-pointer: fine)').matches;
+const dragLook = { fallback: touchUI, on: false, x: 0, y: 0 };
+if (touchUI) {
+  document.body.classList.add('touch');
+  const pad = document.getElementById('joy'), knob = pad.querySelector('i');
+  let id = null;
+  const move = (e) => {
+    const r = pad.getBoundingClientRect(), R = r.width / 2 - 22;
+    let x = (e.clientX - r.left - r.width / 2) / R, y = (e.clientY - r.top - r.height / 2) / R;
+    const l = Math.hypot(x, y); if (l > 1) { x /= l; y /= l; }
+    knob.style.transform = `translate(${x * R}px, ${y * R}px)`;
+    joy.x = x; joy.y = -y;
+  };
+  const release = (e) => { if (e.pointerId !== id) return; id = null; joy.x = joy.y = 0; knob.style.transform = ''; };
+  pad.addEventListener('pointerdown', (e) => { id = e.pointerId; pad.setPointerCapture(id); startAudio(); move(e); });
+  pad.addEventListener('pointermove', (e) => { if (e.pointerId === id) move(e); });
+  pad.addEventListener('pointerup', release);
+  pad.addEventListener('pointercancel', release);
+}
 const _look = new THREE.Euler(0, 0, 0, 'YXZ');
 document.addEventListener('pointerlockerror', () => { dragLook.fallback = true; loader.classList.add('gone'); });
 canvas.addEventListener('pointerdown', (e) => { if (dragLook.fallback && !cine.on) { dragLook.on = true; dragLook.x = e.clientX; dragLook.y = e.clientY; canvas.setPointerCapture(e.pointerId); } });
 canvas.addEventListener('pointerup', () => { dragLook.on = false; });
+canvas.addEventListener('pointercancel', () => { dragLook.on = false; });
 canvas.addEventListener('pointermove', (e) => {
   if (!dragLook.on || cine.on) return;
   const dx = e.clientX - dragLook.x, dy = e.clientY - dragLook.y; dragLook.x = e.clientX; dragLook.y = e.clientY;
+  const k = e.pointerType === 'touch' ? 0.005 : 0.0035;
   _look.setFromQuaternion(camera.quaternion);
-  _look.y -= dx * 0.0035; _look.x -= dy * 0.0035;
+  _look.y -= dx * k; _look.x -= dy * k;
   _look.x = THREE.MathUtils.clamp(_look.x, -Math.PI / 2 + 0.12, Math.PI / 2 - 0.12);
   camera.quaternion.setFromEuler(_look);
 });
-// W/S fly along the view direction, A/D strafe across it; Q/E sink and rise along world vertical.
-// C toggles the cinematic loop. Motion is eased so starts and stops glide.
+// W/S fly along the view direction, A/D strafe across it (on touch: the joystick). C toggles the cinematic loop.
+// Motion is eased so starts and stops glide.
 const keys = new Set();
-const MOVE_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE'];
+const MOVE_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD'];
 addEventListener('keydown', (e) => {
   if (!controls.isLocked && !dragLook.fallback) return;   // input counts only once you've entered
   if (MOVE_KEYS.includes(e.code)) keys.add(e.code);
@@ -2373,7 +2529,8 @@ addEventListener('keydown', (e) => {
 addEventListener('keyup', (e) => keys.delete(e.code));
 addEventListener('blur', () => keys.clear());
 const vel = new THREE.Vector3(), _fwd = new THREE.Vector3(), _right = new THREE.Vector3(), _wish = new THREE.Vector3();
-const WALK = 1.5, LIFT = 0.8;
+const WALK = 1.5;
+const joy = { x: 0, y: 0 };                                        // analogue stick, |joy| ≤ 1 (y = forward)
 function roam(dt) {
   camera.getWorldDirection(_fwd);                                  // full view direction, pitch included
   _right.crossVectors(_fwd, camera.up).normalize();
@@ -2382,9 +2539,10 @@ function roam(dt) {
   if (keys.has('KeyS')) _wish.sub(_fwd);
   if (keys.has('KeyD')) _wish.add(_right);
   if (keys.has('KeyA')) _wish.sub(_right);
-  if (_wish.lengthSq() > 0) _wish.normalize().multiplyScalar(WALK);
-  if (keys.has('KeyE')) _wish.y += LIFT;
-  if (keys.has('KeyQ')) _wish.y -= LIFT;
+  if (_wish.lengthSq() > 0) _wish.normalize();
+  _wish.addScaledVector(_fwd, joy.y).addScaledVector(_right, joy.x);
+  if (_wish.lengthSq() > 1) _wish.normalize();
+  _wish.multiplyScalar(WALK);
   vel.lerp(_wish, 1 - Math.exp(-dt * 7));
   camera.position.addScaledVector(vel, dt);
   confine(camera.position);
@@ -2417,13 +2575,12 @@ const hdr = scenePass.getTextureNode();
 
 const uVig = uniform(0.2);
 const uWB = uniform(new THREE.Vector3(1.17, 0.93, 0.8));   // art-directed white balance: the ref's warm olive-green light
-const POST = {};
 const uSat = uniform(1.25);
 const postOut = Fn(() => {
   const uvc = screenUV.sub(0.5);
   const ca = uvc.mul(0.0016);
   const col = vec3(hdr.sample(screenUV.sub(ca)).r, hdr.sample(screenUV).g, hdr.sample(screenUV.add(ca)).b);
-  const glow = POST.glow = bloom(hdr, 0.16, 0.6, 0.85);
+  const glow = bloom(hdr, 0.16, 0.6, 0.85);
   const lit = col.add(glow.rgb.mul(vec3(1.0, 0.82, 0.6)));   // warm halation around sunlit areas
   let o = renderOutput(vec4(lit.mul(uWB), 1)).rgb;
   // gentle grade: restore the saturation AgX trades away, cool shadows a touch
@@ -2438,9 +2595,7 @@ const postOut = Fn(() => {
   return vec4(o, 1);
 })();
 pipeline.outputColorTransform = false;
-pipeline.outputNode = Q.has('debug') && Q.get('debug') === 'caustics'
-  ? vec4(vec3(texture(causticTex, screenUV).r.mul(0.35)), 1)
-  : postOut;
+pipeline.outputNode = postOut;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Probes: sky cube for the sea, then an interior cube as the light probe for everything inside
@@ -2449,9 +2604,9 @@ async function captureProbes() {
   const skyRT = new THREE.CubeRenderTarget(256, { type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter });
   const skyCam = new THREE.CubeCamera(0.1, 5000, skyRT);
   skyCam.position.set(0, 1.4, ZC);
-  train.visible = false; sea.visible = false;
+  train.visible = false; sea.visible = false; clouds.visible = false; uHaze.value = 0;
   skyCam.update(renderer, scene);
-  train.visible = true; sea.visible = true;
+  train.visible = true; sea.visible = true; clouds.visible = true; uHaze.value = 1;
   sea.material = seaMaterial(skyRT.texture);
   for (const m of allLit) { m.envMap = skyRT.texture; m.envMapIntensity = 0.25; m.needsUpdate = true; }
   const inRT = new THREE.CubeRenderTarget(256, { type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter });
@@ -2510,7 +2665,7 @@ function setCinematic(on) {
   ui.body.classList.toggle('cinematic', on);
   ui.btn.setAttribute('aria-pressed', String(on));
   ui.label.textContent = on ? 'Exit cinematic' : 'Cinematic shots';
-  if (on) cine.t0 = clock.elapsed;
+  if (on) { cine.t0 = clock.elapsed; joy.x = joy.y = 0; }
   else {
     // stay exactly where the last shot left the camera; free roam resumes from there
     vel.set(0, 0, 0);
@@ -2522,15 +2677,26 @@ ui.btn.addEventListener('click', () => { startAudio(); setCinematic(!cine.on); }
 // ─────────────────────────────────────────────────────────────────────────────
 // Audio: pond ambience, faded in and out on every loop
 // ─────────────────────────────────────────────────────────────────────────────
-const audio = { ctx: null, buf: null, started: false };
+const audio = { buf: null, started: false, ready: null };
 const FADE = 3.5, VOL = 0.75;
+// decoded while loading (an offline context needs no user gesture), so the ambience starts the moment you enter
+function preloadAudio() {
+  audio.ready = (async () => {
+    try {
+      const data = await (await fetch('pond.mp3')).arrayBuffer();
+      audio.buf = await new OfflineAudioContext(2, 1, 44100).decodeAudioData(data);
+    } catch (e) { console.warn('audio', e); }
+  })();
+  return audio.ready;
+}
 async function startAudio() {
   if (audio.started) return;
   audio.started = true;
   try {
-    const ctx = audio.ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const data = await (await fetch('pond.mp3')).arrayBuffer();
-    audio.buf = await ctx.decodeAudioData(data);
+    await audio.ready;
+    if (!audio.buf) return;
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    await ctx.resume();
     const master = ctx.createGain(); master.gain.value = 1; master.connect(ctx.destination);
     const schedule = (when) => {
       const dur = audio.buf.duration;
@@ -2552,16 +2718,9 @@ for (const ev of ['pointerdown', 'keydown', 'touchstart']) addEventListener(ev, 
 // ─────────────────────────────────────────────────────────────────────────────
 // Loop
 // ─────────────────────────────────────────────────────────────────────────────
-const clock = { last: performance.now(), elapsed: Q.has('t') ? Number(Q.get('t')) : 0, paused: Q.has('pause') };
+const clock = { last: performance.now(), elapsed: 0 };
 const fpsEl = document.getElementById('fpsv');
 let fpsAcc = 0, fpsN = 0;
-const refImg = document.getElementById('refov');
-if (Q.has('ref')) { refImg.src = 'ref.jpg'; refImg.style.display = 'block'; refImg.style.opacity = Q.get('ref') || '0.5'; }
-if (Q.has('side')) {   // debug: reference docked at the right for side-by-side colour checks
-  refImg.src = 'ref.jpg';
-  Object.assign(refImg.style, { display: 'block', opacity: '1', left: 'auto', right: '0', width: 'auto', height: '100vh', objectFit: 'contain' });
-  for (const el of document.querySelectorAll('.brand, #fps, #cine')) el.style.display = 'none';
-}
 
 addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); if (!cine.on) fitFov(); else { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); } });
 
@@ -2571,12 +2730,11 @@ function frame() {
   clock.last = now;
   fpsAcc += dt; fpsN++;
   if (fpsAcc > 0.5) { fpsEl.textContent = Math.round(fpsN / fpsAcc); fpsAcc = 0; fpsN = 0; }
-  const realDt = dt;
-  if (clock.paused) dt = 0;
   clock.elapsed += dt;
   const t = clock.elapsed;
   uTime.value = t;
   strapSwing.value = Math.sin(t * 0.21) * 0.025;
+  uCloudDrift.value = t * 0.0009;
 
   updateFish(dt, t);
   // drift floaters on a slow circulation
@@ -2601,68 +2759,54 @@ function frame() {
     ui.ttl.textContent = SHOTS[i].name;
     ui.bar.style.width = `${(k * 100).toFixed(1)}%`;
   } else {
-    roam(realDt);
+    roam(dt);
     // ease the lens back to the walking field of view after a cinematic shot
-    if (Math.abs(camera.fov - HERO.fov) > 0.01) { camera.fov += (HERO.fov - camera.fov) * (1 - Math.exp(-realDt * 3)); camera.updateProjectionMatrix(); }
+    if (Math.abs(camera.fov - HERO.fov) > 0.01) { camera.fov += (HERO.fov - camera.fov) * (1 - Math.exp(-dt * 3)); camera.updateProjectionMatrix(); }
   }
+  renderOnce();
+}
+
+function renderOnce() {
   uProj.value.set(camera.projectionMatrix.elements[0], camera.projectionMatrix.elements[5]);
-
-
   renderer.setRenderTarget(causticRT);
   renderer.render(causticScene, causticCam);
   renderer.setRenderTarget(null);
   pipeline.render();
-  if (window.__grab) { const g = window.__grab; window.__grab = null; g(); }
 }
 
-// debug: region colour stats of the live frame vs the reference (portrait framing), e.g. await __measure()
-const REGIONS = {
-  ceiling_ctr: [0.40, 0.03, 0.60, 0.12], ceiling_side: [0.30, 0.14, 0.40, 0.22], vines_tr: [0.62, 0.06, 0.90, 0.20],
-  screen: [0.36, 0.24, 0.60, 0.29], win_L_sky: [0.01, 0.34, 0.08, 0.45], win_R_sky: [0.90, 0.32, 0.98, 0.45],
-  wall_L: [0.12, 0.33, 0.16, 0.45], end_door: [0.43, 0.50, 0.51, 0.56], flowers_L: [0.04, 0.54, 0.20, 0.62],
-  flowers_R: [0.80, 0.51, 0.97, 0.60], partition_R: [0.90, 0.66, 0.99, 0.74], water_mid: [0.38, 0.62, 0.62, 0.72],
-  water_near: [0.25, 0.86, 0.75, 0.97],
-};
-function regionStats(src) {
-  const W = 144, H = 256, c = document.createElement('canvas'); c.width = W; c.height = H;
-  const g = c.getContext('2d'); g.drawImage(src, 0, 0, W, H);
-  const d = g.getImageData(0, 0, W, H).data, out = {}, raw = {};
-  for (const [k, [x0, y0, x1, y1]] of Object.entries(REGIONS)) {
-    let r = 0, gg = 0, b = 0, n = 0;
-    for (let y = Math.floor(y0 * H); y < y1 * H; y++) for (let x = Math.floor(x0 * W); x < x1 * W; x++) { const i = (y * W + x) * 4; r += d[i]; gg += d[i + 1]; b += d[i + 2]; n++; }
-    r /= n; gg /= n; b /= n; raw[k] = [r, gg, b];
-    const mx = Math.max(r, gg, b), mn = Math.min(r, gg, b);
-    let h = 0; if (mx > mn) { h = mx === r ? (gg - b) / (mx - mn) : mx === gg ? 2 + (b - r) / (mx - mn) : 4 + (r - gg) / (mx - mn); h = (h * 60 + 360) % 360; }
-    out[k] = `${[r, gg, b].map(v => String(Math.round(v)).padStart(3)).join(',')} h${String(Math.round(h)).padStart(3)} s${(mx ? (mx - mn) / mx : 0).toFixed(2)} v${(mx / 255).toFixed(2)}`;
+// Warm-up behind the loading veil: build every pipeline (main pass, shadow map, water reflection, caustics,
+// post chain) before entry. Culling is switched off so one sweep of views reaches every object.
+async function warmUp() {
+  const culled = [];
+  scene.traverse((o) => { if (o.frustumCulled) { culled.push(o); o.frustumCulled = false; } });
+  await renderer.compileAsync(scene, camera);
+  const views = [
+    [HERO.pos, HERO.target],
+    [V3(0, 1.3, -6.0), V3(0, 1.2, 3.0)],          // back toward the near end
+    [V3(0, 1.25, -5.0), V3(2, 1.3, -5.2)],        // sun-side windows
+    [V3(0, 1.25, -5.0), V3(-2, 1.3, -5.2)],       // shade-side windows
+    [V3(0, 1.6, -5.0), V3(0, 2.4, -5.6)],         // ceiling
+    [V3(0, 1.0, -3.0), V3(0, 0.2, -4.0)],         // water and koi
+    ...SHOTS.filter((sh) => !sh.follow).map((sh) => [sh.from.p, sh.from.t]),
+  ];
+  for (const [p, tg] of views) {
+    camera.position.copy(p); camera.lookAt(tg); camera.updateMatrixWorld();
+    renderOnce();
+    await new Promise((r) => setTimeout(r, 16));
   }
-  out.raw = raw;
-  return out;
+  for (const o of culled) o.frustumCulled = true;
+  camera.position.copy(HERO.pos); camera.lookAt(HERO.target);
 }
-// debug: average sRGB of arbitrary screen rectangles (normalized) in the live frame
-window.__sample = async (rects) => new Promise((res) => {
-  window.__grab = () => {
-    const W = 320, H = Math.round(320 * innerHeight / innerWidth), c = document.createElement('canvas'); c.width = W; c.height = H;
-    const g = c.getContext('2d'); g.drawImage(canvas, 0, 0, W, H); const d = g.getImageData(0, 0, W, H).data;
-    res(rects.map(([x0, y0, x1, y1]) => { let r = 0, gg = 0, b = 0, n = 0;
-      for (let y = Math.floor(y0 * H); y < y1 * H; y++) for (let x = Math.floor(x0 * W); x < x1 * W; x++) { const i = (y * W + x) * 4; r += d[i]; gg += d[i + 1]; b += d[i + 2]; n++; }
-      return [r / n, gg / n, b / n].map(Math.round); }));
-  };
-});
-window.__measure = async () => {
-  const ref = new Image(); ref.src = 'ref.jpg'; await ref.decode();
-  const live = await new Promise((res) => { window.__grab = () => res(regionStats(canvas)); });
-  const r = regionStats(ref), rows = [];
-  for (const k of Object.keys(REGIONS)) rows.push(`${k.padEnd(13)} ref ${r[k]}  | ours ${live[k]}`);
-  window.__last = { ref: r.raw, ours: live.raw };
-  return rows.join('\n');
-};
 
+
+const audioReady = preloadAudio();
 await captureProbes();
-if (Q.has('shot')) { setCinematic(true); cine.t0 = -Number(Q.get('shot')) * SHOT_LEN - (Number(Q.get('k') ?? 0.5)) * SHOT_LEN + clock.elapsed; }
+await warmUp();
+await audioReady;
+clock.last = performance.now();
 renderer.setAnimationLoop(frame);
-loader.innerHTML = '<div>Click to enter<small>Pond Line</small></div>';
+loader.innerHTML = `<div>${touchUI ? 'Tap' : 'Click'} to enter<small>Pond Line</small></div>`;
 loader.classList.add('ready');
-window.__pond = { uSeaFar, uSeaNear, uSeaWaves, fill, uWB, uSkyGain, uRoofOpen, uSat, THREE, scene, camera, controls, renderer, fishes, M, setCinematic, clock, POST, allLit, sun, sky, uWaterAmb, water };
 </script>
 </body>
 </html>
