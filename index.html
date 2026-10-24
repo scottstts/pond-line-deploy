@@ -2526,7 +2526,7 @@ canvas.addEventListener('pointercancel', () => { dragLook.on = false; });
 canvas.addEventListener('pointermove', (e) => {
   if (!dragLook.on || cine.on) return;
   const dx = e.clientX - dragLook.x, dy = e.clientY - dragLook.y; dragLook.x = e.clientX; dragLook.y = e.clientY;
-  const k = e.pointerType === 'touch' ? -0.005 : 0.0035;   // touch drags the scene; a mouse drag turns the head
+  const k = e.pointerType === 'touch' ? 0.005 : 0.0035;   // touch drags the scene; a mouse drag turns the head
   _look.setFromQuaternion(camera.quaternion);
   _look.y -= dx * k; _look.x -= dy * k;
   _look.x = THREE.MathUtils.clamp(_look.x, -Math.PI / 2 + 0.12, Math.PI / 2 - 0.12);
