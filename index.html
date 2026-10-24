@@ -2526,7 +2526,7 @@ canvas.addEventListener('pointercancel', () => { dragLook.on = false; });
 canvas.addEventListener('pointermove', (e) => {
   if (!dragLook.on || cine.on) return;
   const dx = e.clientX - dragLook.x, dy = e.clientY - dragLook.y; dragLook.x = e.clientX; dragLook.y = e.clientY;
-  const k = e.pointerType === 'touch' ? 0.005 : 0.0035;   // touch drags the scene; a mouse drag turns the head
+  const k = e.pointerType === 'touch' ? -0.005 : 0.0035;   // touch drags the scene; a mouse drag turns the head
   _look.setFromQuaternion(camera.quaternion);
   _look.y -= dx * k; _look.x -= dy * k;
   _look.x = THREE.MathUtils.clamp(_look.x, -Math.PI / 2 + 0.12, Math.PI / 2 - 0.12);
@@ -2545,6 +2545,7 @@ addEventListener('keyup', (e) => keys.delete(e.code));
 addEventListener('blur', () => keys.clear());
 const vel = new THREE.Vector3(), _fwd = new THREE.Vector3(), _right = new THREE.Vector3(), _wish = new THREE.Vector3();
 const WALK = 1.5;
+const _step = new THREE.Vector3();
 const joy = { x: 0, y: 0 };                                        // analogue stick, |joy| ≤ 1 (y = forward)
 function roam(dt) {
   camera.getWorldDirection(_fwd);                                  // full view direction, pitch included
@@ -2559,8 +2560,8 @@ function roam(dt) {
   if (_wish.lengthSq() > 1) _wish.normalize();
   _wish.multiplyScalar(WALK);
   vel.lerp(_wish, 1 - Math.exp(-dt * 7));
-  camera.position.addScaledVector(vel, dt);
-  confine(camera.position);
+  _step.copy(vel).multiplyScalar(dt);
+  moveConfined(camera.position, _step, vel);
 }
 
 function fitFov() {
@@ -2571,17 +2572,54 @@ function fitFov() {
 }
 fitFov();
 
-// the cabin volume the viewer may occupy: above the water, below the ceiling, inside walls and end walls,
-// and kept to the aisle at seat level so the head never passes through benches or flower beds
+// the cabin volume the viewer may occupy: above the water, below the ceiling, inside walls and end walls
 const BOX = { x: R - 0.15, y0: WATER_Y + 0.12, y1: 2.12, z0: Z_FAR + 0.3, z1: Z_NEAR - 0.3 };
+const BOX_LO = [-BOX.x, BOX.y0, BOX.z0], BOX_HI = [BOX.x, BOX.y1, BOX.z1];
 const clampBox = (v) => { v.x = THREE.MathUtils.clamp(v.x, -BOX.x, BOX.x); v.y = THREE.MathUtils.clamp(v.y, BOX.y0, BOX.y1); v.z = THREE.MathUtils.clamp(v.z, BOX.z0, BOX.z1); };
-const inDoorZone = (z) => DOORS.some((d) => Math.abs(z - d) < DOOR_W / 2 - 0.12);
-function confine(v) {
-  clampBox(v);
-  // over the benches only above the flower mounds; in door zones the full width is open
-  if (v.y < SEAT_Y + 0.6 && !inDoorZone(v.z)) v.x = THREE.MathUtils.clamp(v.x, -(R - 0.68), R - 0.68);
-  // stay below the strap rails / racks near the walls
-  if (Math.abs(v.x) > R - 0.62) v.y = Math.min(v.y, 1.7);
+// solid blocks inside that volume, as axis-aligned boxes (lo/hi per axis x, y, z): the benches and flower mounds
+// along each wall (open in the door zones, so the head never passes through them) and the strap rails / racks
+// overhead near the walls
+const OBSTACLES = (() => {
+  const out = [], INF = Infinity;
+  const BENCH_TOP = SEAT_Y + 0.6, BENCH_X = R - 0.68, RACK_X = R - 0.62, RACK_Y0 = 1.7;
+  // bench runs along z: the car with the door openings cut out
+  const gaps = DOORS.map((d) => [d - (DOOR_W / 2 - 0.12), d + (DOOR_W / 2 - 0.12)]).sort((a, b) => a[0] - b[0]);
+  const runs = [];
+  let z = -INF;
+  for (const [g0, g1] of gaps) { runs.push([z, g0]); z = g1; }
+  runs.push([z, INF]);
+  for (const s of [-1, 1]) {
+    const bx = s > 0 ? [BENCH_X, INF] : [-INF, -BENCH_X];
+    for (const [z0, z1] of runs) out.push({ lo: [bx[0], -INF, z0], hi: [bx[1], BENCH_TOP, z1] });
+    const rx = s > 0 ? [RACK_X, INF] : [-INF, -RACK_X];
+    out.push({ lo: [rx[0], RACK_Y0, -INF], hi: [rx[1], INF, INF] });
+  }
+  return out;
+})();
+const AX = ['x', 'y', 'z'];
+// Move v by step one axis at a time, so the camera slides along whatever it touches. A step that would cross into
+// an obstacle (or out of the cabin) stops on its face, and that axis' velocity is dropped so nothing keeps
+// pushing; the camera is never relocated. If it already starts inside an obstacle (e.g. where a cinematic shot
+// left it), only moves that don't sink it deeper are allowed, so it backs out smoothly.
+function moveConfined(v, step, velocity) {
+  for (const a of [0, 2, 1]) {
+    const k = AX[a], from = v[k], want = from + step[k];
+    if (step[k] === 0) continue;
+    // the cabin walls: stop at them, but never pull back a camera that is already past one
+    let to = step[k] > 0 ? Math.min(want, Math.max(from, BOX_HI[a])) : Math.max(want, Math.min(from, BOX_LO[a]));
+    for (const o of OBSTACLES) {
+      // only a box the camera lines up with on the other two axes can be hit along this one
+      let aligned = true;
+      for (let b = 0; b < 3; b++) if (b !== a && !(v[AX[b]] > o.lo[b] && v[AX[b]] < o.hi[b])) { aligned = false; break; }
+      if (!aligned) continue;
+      const lo = o.lo[a], hi = o.hi[a];
+      if (from <= lo && to > lo) to = lo;
+      else if (from >= hi && to < hi) to = hi;
+      else if (from > lo && from < hi && Math.min(to - lo, hi - to) > Math.min(from - lo, hi - from)) to = from;
+    }
+    if (to !== want && velocity) velocity[k] = 0;
+    v[k] = to;
+  }
 }
 
 const pipeline = new THREE.RenderPipeline(renderer);
@@ -2684,7 +2722,7 @@ function setCinematic(on) {
   else {
     // stay exactly where the last shot left the camera; free roam resumes from there
     vel.set(0, 0, 0);
-    confine(camera.position);
+    clampBox(camera.position);
   }
 }
 ui.btn.addEventListener('click', () => { startAudio(); setCinematic(!cine.on); });
