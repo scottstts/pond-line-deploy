@@ -2475,13 +2475,28 @@ camera.layers.enable(1);
 camera.lookAt(HERO.target);
 // first-person look: click the view to lock the pointer, mouse turns the head, Esc releases
 const controls = new PointerLockControls(camera, document.body);
-controls.pointerSpeed = 0.75;
+// Chrome reports pointer-lock movement in physical pixels, Safari in device-independent pixels: scale Safari by
+// devicePixelRatio so turning speed matches across browsers.
+const isSafari = /^((?!chrome|chromium|crios|fxios|edg|android).)*safari/i.test(navigator.userAgent);
+controls.pointerSpeed = 0.75 * (isSafari ? devicePixelRatio : 1);
 controls.minPolarAngle = 0.12; controls.maxPolarAngle = Math.PI - 0.12;
 // entry: the loader becomes a "click to enter" veil; entering locks the pointer (and starts the ambience)
-const enter = () => { startAudio(); if (dragLook.fallback) loader.classList.add('gone'); else controls.lock(); };
+// iOS Safari may not re-present the WebGPU canvas after the opaque veil above it fades out, until layout changes.
+// Once faded, take the veil out of layout entirely and nudge the canvas into a fresh composite.
+function hideVeil() {
+  loader.classList.add('gone'); loader.classList.remove('paused');
+  setTimeout(() => {
+    if (!loader.classList.contains('gone')) return;
+    loader.style.display = 'none';
+    canvas.style.transform = 'translateZ(0)';
+    requestAnimationFrame(() => requestAnimationFrame(() => { canvas.style.transform = ''; }));
+  }, 1300);
+}
+function showVeil() { loader.style.display = ''; loader.classList.remove('gone'); loader.classList.add('paused'); }
+const enter = () => { startAudio(); if (dragLook.fallback) hideVeil(); else controls.lock(); };
 loader.addEventListener('click', () => { if (loader.classList.contains('ready')) enter(); });
-controls.addEventListener('lock', () => { loader.classList.add('gone'); loader.classList.remove('paused'); });
-controls.addEventListener('unlock', () => { loader.classList.remove('gone'); loader.classList.add('paused'); vel.set(0, 0, 0); keys.clear(); });
+controls.addEventListener('lock', hideVeil);
+controls.addEventListener('unlock', () => { showVeil(); vel.set(0, 0, 0); keys.clear(); });
 canvas.addEventListener('click', () => { if (!controls.isLocked && !dragLook.fallback) controls.lock(); });
 // where pointer lock is refused (embedded views, some browsers) or absent (touch), drag to look instead
 const touchUI = matchMedia('(pointer: coarse)').matches && !matchMedia('(any-pointer: fine)').matches;
@@ -2504,14 +2519,14 @@ if (touchUI) {
   pad.addEventListener('pointercancel', release);
 }
 const _look = new THREE.Euler(0, 0, 0, 'YXZ');
-document.addEventListener('pointerlockerror', () => { dragLook.fallback = true; loader.classList.add('gone'); });
+document.addEventListener('pointerlockerror', () => { dragLook.fallback = true; hideVeil(); });
 canvas.addEventListener('pointerdown', (e) => { if (dragLook.fallback && !cine.on) { dragLook.on = true; dragLook.x = e.clientX; dragLook.y = e.clientY; canvas.setPointerCapture(e.pointerId); } });
 canvas.addEventListener('pointerup', () => { dragLook.on = false; });
 canvas.addEventListener('pointercancel', () => { dragLook.on = false; });
 canvas.addEventListener('pointermove', (e) => {
   if (!dragLook.on || cine.on) return;
   const dx = e.clientX - dragLook.x, dy = e.clientY - dragLook.y; dragLook.x = e.clientX; dragLook.y = e.clientY;
-  const k = e.pointerType === 'touch' ? 0.005 : 0.0035;
+  const k = e.pointerType === 'touch' ? -0.005 : 0.0035;   // touch drags the scene; a mouse drag turns the head
   _look.setFromQuaternion(camera.quaternion);
   _look.y -= dx * k; _look.x -= dy * k;
   _look.x = THREE.MathUtils.clamp(_look.x, -Math.PI / 2 + 0.12, Math.PI / 2 - 0.12);
@@ -2689,31 +2704,47 @@ function preloadAudio() {
   })();
   return audio.ready;
 }
-async function startAudio() {
+// Mobile browsers only let audio start inside an activating gesture (tap / click / key), and iOS does not count
+// pointerdown or touchstart. So: one context, created and resumed synchronously in every gesture until it actually
+// runs; the loop is scheduled once it does. The page declares itself as media playback so the silent switch
+// doesn't mute it on iOS.
+let actx = null;
+function startAudio() {
   if (audio.started) return;
-  audio.started = true;
   try {
-    await audio.ready;
-    if (!audio.buf) return;
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    await ctx.resume();
-    const master = ctx.createGain(); master.gain.value = 1; master.connect(ctx.destination);
-    const schedule = (when) => {
-      const dur = audio.buf.duration;
-      const src = ctx.createBufferSource(); src.buffer = audio.buf;
-      const g = ctx.createGain(); src.connect(g).connect(master);
-      g.gain.setValueAtTime(0, when);
-      g.gain.linearRampToValueAtTime(VOL, when + FADE);
-      g.gain.setValueAtTime(VOL, when + dur - FADE);
-      g.gain.linearRampToValueAtTime(0, when + dur);
-      src.start(when);
-      // queue the next pass a little before this one ends
-      setTimeout(() => schedule(when + dur), Math.max(0, (when + dur - ctx.currentTime - 2) * 1000));
+    if (navigator.audioSession) navigator.audioSession.type = 'playback';
+    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state !== 'running') {
+      actx.resume();
+      const s = actx.createBufferSource(); s.buffer = actx.createBuffer(1, 1, 22050); s.connect(actx.destination); s.start(0);
+    }
+    const go = () => {
+      if (audio.started || actx.state !== 'running' || !audio.buf) return;
+      audio.started = true;
+      playLoop(actx);
     };
-    schedule(ctx.currentTime + 0.05);
+    go();
+    actx.onstatechange = go;
+    audio.ready.then(go);
   } catch (e) { console.warn('audio', e); }
 }
-for (const ev of ['pointerdown', 'keydown', 'touchstart']) addEventListener(ev, startAudio, { once: true, passive: true });
+function playLoop(ctx) {
+  const master = ctx.createGain(); master.gain.value = 1; master.connect(ctx.destination);
+  const schedule = (when) => {
+    const dur = audio.buf.duration;
+    const src = ctx.createBufferSource(); src.buffer = audio.buf;
+    const g = ctx.createGain(); src.connect(g).connect(master);
+    g.gain.setValueAtTime(0, when);
+    g.gain.linearRampToValueAtTime(VOL, when + FADE);
+    g.gain.setValueAtTime(VOL, when + dur - FADE);
+    g.gain.linearRampToValueAtTime(0, when + dur);
+    src.start(when);
+    // queue the next pass a little before this one ends
+    setTimeout(() => schedule(when + dur), Math.max(0, (when + dur - ctx.currentTime - 2) * 1000));
+  };
+  schedule(ctx.currentTime + 0.05);
+}
+for (const ev of ['click', 'touchend', 'pointerup', 'keydown']) addEventListener(ev, startAudio, { passive: true });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Loop
@@ -2722,7 +2753,7 @@ const clock = { last: performance.now(), elapsed: 0 };
 const fpsEl = document.getElementById('fpsv');
 let fpsAcc = 0, fpsN = 0;
 
-addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); if (!cine.on) fitFov(); else { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); } });
+addEventListener('resize', () => { if (!innerWidth || !innerHeight) return; renderer.setSize(innerWidth, innerHeight); if (!cine.on) fitFov(); else { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); } });
 
 function frame() {
   const now = performance.now();
@@ -2759,6 +2790,10 @@ function frame() {
     ui.ttl.textContent = SHOTS[i].name;
     ui.bar.style.width = `${(k * 100).toFixed(1)}%`;
   } else {
+    // a broken camera state (e.g. a zero-size viewport during a mobile toolbar change) would render nothing
+    const q = camera.quaternion, cp = camera.position;
+    if (!Number.isFinite(cp.x + cp.y + cp.z + q.x + q.y + q.z + q.w)) { camera.position.copy(HERO.pos); camera.lookAt(HERO.target); vel.set(0, 0, 0); }
+    if (!Number.isFinite(camera.projectionMatrix.elements[0])) fitFov();
     roam(dt);
     // ease the lens back to the walking field of view after a cinematic shot
     if (Math.abs(camera.fov - HERO.fov) > 0.01) { camera.fov += (HERO.fov - camera.fov) * (1 - Math.exp(-dt * 3)); camera.updateProjectionMatrix(); }
